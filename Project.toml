@@ -1,0 +1,10 @@
+name = "JournaledJets"
+uuid = "65f49b07-ee27-4ec8-b155-7297e84df31f"
+authors = ["cvx "]
+version = "0.1.0"
+
+[deps]
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+Jets = "2a57b368-ab28-5ba9-84aa-637fe7991822"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Schedulers = "fcb5363a-df8d-57f1-a64b-7615e60d793b"
