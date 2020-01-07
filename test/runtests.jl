@@ -218,6 +218,7 @@ end
     b = rand(Float64)
     c = rand(Float64)
     x = a*u .+ b*v .+ c*w
+
     @test typeof(x) == JournaledJets.DJArray{Float64,1,Array{Float64,1}}
 
     _u = collect(u)
@@ -344,47 +345,37 @@ end
     @test isa(A, Jop)
 end
 
-#@testset "JopJBlock, homogeneous, tall and skinny" begin
-using Distributed
-addprocs(3)
-@everywhere using Jets, JournaledJets, Logging, Test, LinearAlgebra
+@testset "JopJBlock, homogeneous, tall and skinny" begin
+    using Distributed
+    addprocs(3)
+    @everywhere using Jets, JournaledJets, Logging, Test, LinearAlgebra
 
-@everywhere Logging.global_logger(Logging.ConsoleLogger(stdout, Logging.Debug))
+    @everywhere Logging.global_logger(Logging.ConsoleLogger(stdout, Logging.Debug))
 
-@everywhere JopBar_f!(d,m) = d .= m.^2
-@everywhere JopBar_df!(δd,δm;mₒ,kwargs...) = δd .= 2 .* mₒ .* δm
-@everywhere function JopBar(n) spc = JetSpace(Float64, n)
-    JopNl(f! = JopBar_f!, df! = JopBar_df!, df′! = JopBar_df!, dom = spc, rng = spc)
+    @everywhere JopBar_f!(d,m) = d .= m.^2
+    @everywhere JopBar_df!(δd,δm;mₒ,kwargs...) = δd .= 2 .* mₒ .* δm
+    @everywhere function JopBar(n) spc = JetSpace(Float64, n)
+        JopNl(f! = JopBar_f!, df! = JopBar_df!, df′! = JopBar_df!, dom = spc, rng = spc)
+    end
+
+    _F  = DJArray(_->[JopBar(10)], (4,1), workers())
+    F = @blockop _F
+
+    _G = [_F[i] for i in 1:4, j in 1:1]
+    G = @blockop _G
+    @test isa(F, JopNl{<:Jet{<:JetSpace,<:JetJSpace,typeof(JournaledJets.JetJBlock_f!)}})
+
+    m = rand(domain(F))
+    @test collect(F*m) ≈ G*m
+
+    J = jacobian!(F, m)
+    _J = jacobian!(G, m)
+
+    δm = rand(domain(J))
+    @test collect(J*δm) ≈ _J*δm
+
+    δd = rand(range(J))
+    @test J'*δd ≈ _J'*collect(δd)
+
+    rmprocs(workers())
 end
-
-_F  = DJArray(_->[JopBar(10)], (4,1), workers())
-F = @blockop _F
-
-_G = [_F[i] for i in 1:4, j in 1:1]
-G = @blockop _G
-@test isa(F, JopNl{<:Jet{<:JetSpace,<:JetJSpace,typeof(JournaledJets.JetJBlock_f!)}})
-
-m = rand(domain(F))
-d = F*m;
-_d = G*m;
-__d = collect(d)
-
-@test _d ≈ __d
-
-JournaledJets.blocks(d)[4].where
-
-@test collect(F*m) ≈ G*m
-
-F*m
-
-J = jacobian!(F, m)
-_J = jacobian!(G, m)
-
-δm = rand(domain(J))
-@test collect(J*δm) ≈ _J*δm
-
-δd = rand(range(J))
-@test J'*δd ≈ _J'*collect(δd)
-
-rmprocs(workers())
-#end

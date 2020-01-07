@@ -3,7 +3,7 @@ module JournaledJets
 using Distributed, Jets, LinearAlgebra, ParallelOperations, Schedulers
 
 struct DJArray{T,N,A<:AbstractArray{T}} <: AbstractArray{T,N}
-    blocks::Array{Future,N}
+    blocks::Future
     indices::Array{NTuple{N,UnitRange{Int}},N}
     journal::Vector{Expr}
 end
@@ -27,7 +27,7 @@ function DJArray(f::Function, nblocks::NTuple{1,Int}, pids)
     A = remotecall_fetch(DJArray_block_typeof, blocks[1].where, blocks[1])
     T = eltype(A)
 
-    DJArray{T,1,A}(blocks, indices, Expr[])
+    DJArray{T,1,A}(remotecall(identity, myid(), blocks), indices, Expr[])
 end
 
 function DJArray(f::Function, nblock::NTuple{N,Int}, pids) where {N}
@@ -54,37 +54,41 @@ function DJArray(f::Function, nblock::NTuple{N,Int}, pids) where {N}
     A = remotecall_fetch(DJArray_block_typeof, blocks[1].where, blocks[1])
     T = eltype(A)
 
-    DJArray{T,N,A}(blocks, indices, Expr[])
+    DJArray{T,N,A}(remotecall(identity, myid(), blocks), indices, Expr[])
 end
 
 # DJArray interface implementation <--
+function getblock_updatemaster(iblock, x, newfuture)
+    blocks(x)[iblock] = newfuture
+    nothing
+end
+
 function _getblock(x::DJArray{T,N,A}, iblock::Int) where {T,N,A}
-    xblock = fetch(blocks(x)[iblock])::A
-    _where = blocks(x)[iblock].where
+    _blocks = blocks(x)
+    xblock = fetch(_blocks[iblock])::A
+    _where = _blocks[iblock].where
     _myid = myid()
     if _myid != _where
-        x.blocks[iblock] = remotecall(identity, _myid, xblock)
-        # send the future back to the master pid .. how do we do this ??
-        # do we need x to contain some reference to the master-held blocks (i.e. a Future)
-        @info "_myid=$_myid, iblock=$iblock, where=$(blocks(x)[iblock].where)"
-        @info "before fetch, ex=$(extrema(xblock))"
-        xblock = fetch(blocks(x)[iblock])
-        @info "after fetch, ex=$(extrema(xblock))"
-        @debug "Owner of block $iblock has switched from process $_where to $_myid, eltype(xblock)=$(eltype(xblock))"
+        _blocks[iblock] = remotecall(identity, _myid, xblock)
+        remotecall_fetch(getblock_updatemaster, 1, iblock, x, _blocks[iblock])
+        @debug "block $iblock moved from $_where to $_myid"
     end
     xblock
 end
 
-blocks(x::DJArray) = x.blocks
+blocks(x::DJArray) = fetch(x.blocks)
+
 Jets.indices(x::DJArray) = x.indices
 size_dim(x::DJArray{T,N}, idim) where {T,N} = x.indices[ntuple(_idim->_idim==idim ? size(x.indices)[idim] : 1, N)...][idim][end]
 Base.size(x::DJArray{T,N}) where {T,N} = ntuple(idim->size_dim(x, idim), N)
 Jets.getblock(x::DJArray, iblock::Int...) = _getblock(x, LinearIndices(size(blocks(x)))[iblock...])
 Jets.getblock(x::DJArray, iblock::CartesianIndex) = getblock(x, iblock.I...)
+
 DJArray_setblock_local!(block, xblock, ::Type{A}) where {A} = fetch(block)::A .= xblock
 _setblock!(x::DJArray{T,N,A}, xblock, iblock::Int) where {T,N,A} = remotecall_fetch(DJArray_setblock_local!, blocks(x)[iblock].where, blocks(x)[iblock], xblock, A)
 Jets.setblock!(x::DJArray, xblock, iblock::Int...) = _setblock!(x, xblock, LinearIndices(size(blocks(x)))[iblock...])
 Jets.setblock!(x::DJArray, xblock, iblock::CartesianIndex) = setblock!(x, xblock, iblock.I...)
+
 size_blocks(x::DJArray) = size(blocks(x))
 length_blocks(x::DJArray) = prod(size(blocks(x)))
 Jets.nblocks(x::DJArray) = length_blocks(x)
@@ -92,7 +96,7 @@ Jets.nblocks(x::DJArray) = length_blocks(x)
 DJArray_getindex(::Type{A}, block_future, δi) where {A} = getindex(fetch(block_future)::A, δi...)
 function Base.getindex(x::DJArray{T,N,A}, i::Vararg{Int,N}) where {T,N,A}
     iblock = findfirst(rng->mapreduce(idim->i[idim]∈rng[idim], &, 1:N), indices(x))
-    block_future = x.blocks[iblock]
+    block_future = blocks(x)[iblock]
     iₒ = ntuple(idim->indices(x)[iblock][idim][1], N)
     δi = ntuple(idim->i[idim]-iₒ[idim]+1, N)
     remotecall_fetch(DJArray_getindex, block_future.where, A, block_future, δi)
@@ -105,7 +109,7 @@ function Base.similar(x::DJArray{T,N,A}, ::Type{S}) where {T,N,A,S}
     _indices = copy(indices(x))
     _block_futures = cvxpmap(DJArray_similar_block, CartesianIndices(size_blocks(x)), x, S)
     _A = remotecall_fetch(DJArray_similar_typeof, _block_futures[1].where, _block_futures[1])
-    DJArray{S,N,_A}(_block_futures, _indices, Expr[])
+    DJArray{S,N,_A}(remotecall(identity, 1, _block_futures), _indices, Expr[])
 end
 
 DJArray_local_norm(iblock, x::DJArray, p) = norm(getblock(x, iblock), p)
@@ -157,7 +161,7 @@ function Base.collect(x::DJArray{T,1,A}) where {T,A}
     _x = Vector{A}(undef, length_blocks(x))
     n = 0
     for iblock = CartesianIndices(size_blocks(x))
-        _x[iblock] = fetch(x.blocks[iblock])
+        _x[iblock] = fetch(blocks(x)[iblock])
     end
     indicesx = indices(x)
     Jets.BlockArray(_x, [indicesx[i][1] for i=1:length(indicesx)])
@@ -278,14 +282,10 @@ function addmasterpid(pids)
 end
 
 function JetJBlock_local_f!(iblock, d, _m, ops)
-    @info "^^^^^before getblock, iblock=$iblock, d.blocks[4].where=$(d.blocks[4].where), myid()=$(myid())"
     dᵢ = getblock(d, iblock)
-    @info ">>>>>after getblock, iblock=$iblock, d.blocks[4].where=$(d.blocks[4].where), myid()=$(myid())"
     opsᵢ = getblock(ops, iblock)[1]
     m = localpart(_m)
-    @info "***before, iblock=$iblock, extrema(dᵢ)=$(extrema(dᵢ)), myid()=$(myid())"
     mul!(dᵢ, opsᵢ, m)
-    @info "---after, iblock=$iblock, extrema(dᵢ)=$(extrema(dᵢ)), myid()=$(myid())"
     nothing
 end
 
