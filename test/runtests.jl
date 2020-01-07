@@ -1,4 +1,3 @@
-using Revise
 using Distributed, JetPack, Jets, JournaledJets, LinearAlgebra, Schedulers, Test
 
 foo(iblock) = iblock * ones(2)
