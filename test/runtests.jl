@@ -1,7 +1,5 @@
-using Revise
 using Distributed
 addprocs(3)
-@everywhere using Revise
 @everywhere using Distributed, Jets, JournaledJets, LinearAlgebra, Test
 
 @everywhere foo(iblock) = prod(iblock.I) * ones(2)
