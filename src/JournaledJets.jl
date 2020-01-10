@@ -1,122 +1,308 @@
+#=
+TODO
+1. add finalizers
+=#
+
 module JournaledJets
 
-using Distributed, Jets, LinearAlgebra, ParallelOperations, Schedulers
+using Distributed, Jets, LinearAlgebra, ParallelOperations, Serialization, Schedulers
 
-struct DJArray{T,N,A<:AbstractArray{T}} <: AbstractArray{T,N}
-    blocks::Future
+const registry = Dict{Tuple, Any}()
+let JID::Int = 1
+    global next_jid
+    next_jid() = (id = JID; JID += 1; (myid(),id))
+end
+
+struct JArray{T,N,A<:AbstractArray{T}} <: AbstractArray{T,N}
+    id::Tuple{Int,Int}
+    pids::Vector{Int}
+    blockmap::Array{Int,N}
+    localblocks::Array{Union{A,Nothing}, N}
     indices::Array{NTuple{N,UnitRange{Int}},N}
     journal::Vector{Expr}
 end
 
-DJArray_construct_block(iblock, f) = remotecall(f, myid(), iblock)
-DJArray_block_length(block) = length(fetch(block))
-DJArray_block_size(block, i) = size(fetch(block), i)
-DJArray_block_typeof(block) = typeof(fetch(block))
+getblockmap_from_id(id) = registry[id].blockmap
 
-function DJArray(f::Function, nblocks::NTuple{1,Int}, pids)
-    blocks = cvxpmap(Future, DJArray_construct_block, 1:nblocks[1], f)
+function getblockmap_from_id!(id, _blockmap)
+    blockmap = localpart(_blockmap)
+    blockmap .= registry[id].blockmap
+end
 
+setblockmap_from_id!(id, _blockmap) = registry[id].blockmap .= localpart(_blockmap)
+
+indices(A::JArray) = A.indices
+indices_from_id!(id, _indices) = registry[id].indices = _indices
+
+blocklength_from_id(id, iblock) = length(registry[id].localblocks[iblock])
+blocksize_from_id(id, iblock, idim) = size(registry[id].localblocks[iblock], idim)
+
+function initialize_local_part(id, pids, nblocks::NTuple{N,Int}, ::Type{A}) where {N,A}
+    blockmap = zeros(Int, nblocks)
+    localblocks = Union{Nothing,A}[nothing for idx in CartesianIndices(nblocks)]
+    indices = Array{NTuple{N,UnitRange{Int}},N}(undef, nblocks)
+    journal = Expr[]
+    x = JArray{eltype(A),N,A}(id, pids, blockmap, localblocks, indices, journal)
+    registry[id] = x
+    nothing
+end
+
+function fill_local_part(iblock, id, f)
+    x = registry[id]
+    x.blockmap[iblock] = myid()
+    x.localblocks[iblock] = f(iblock)
+    nothing
+end
+
+function finish_local_part(id, indices)
+    x = registry[id]
+    x.indices .= indices
+    nothing
+end
+
+function JArray(f::Function, nblocks::NTuple{N,Int}, pids, ::Type{A}) where {N,A<:AbstractArray}
+    id = next_jid()
+
+    T = eltype(A)
+    @sync for pid in pids
+        @async remotecall_fetch(initialize_local_part, pid, id, pids, nblocks, A)
+    end
+
+    cvxpmap(fill_local_part, CartesianIndices(nblocks), id, f)
+
+    blockmap = zeros(Int, nblocks)
+    x = ArrayFutures(blockmap)
+    @sync for pid in pids
+        @async remotecall_fetch(getblockmap_from_id!, pid, id, x)
+    end
+    reduce!(x)
+    x = bcast(blockmap)
+    @sync for pid in pids
+        @async remotecall_fetch(setblockmap_from_id!, pid, id, x)
+    end
+
+    indices = getindices(id, nblocks, blockmap)
+
+    @sync for pid in pids
+        @async remotecall_fetch(finish_local_part, pid, id, indices)
+    end
+
+    local x
+    if myid() ∈ pids
+        x = registry[id]
+    else
+        localblocks = Union{Nothing,A}[nothing for idx in CartesianIndices(nblocks)]
+        x = JArray{T,N,A}(id, pids, blockmap, localblocks, indices, Expr[])
+        registry[id] = x
+    end
+    x
+end
+
+function getindices(id, nblocks::NTuple{1}, blockmap)
     indices = Vector{NTuple{1,UnitRange{Int}}}(undef, nblocks)
     i1 = 1
-    for (iblock,block) in enumerate(blocks)
-        i2 = i1 + remotecall_fetch(DJArray_block_length, block.where, block) - 1
+    for iblock in CartesianIndices(nblocks)
+        i2 = i1 + remotecall_fetch(blocklength_from_id, blockmap[iblock], id, iblock) - 1
         indices[iblock] = (i1:i2,)
         i1 = i2 + 1
     end
-
-    A = remotecall_fetch(DJArray_block_typeof, blocks[1].where, blocks[1])
-    T = eltype(A)
-
-    DJArray{T,1,A}(remotecall(identity, myid(), blocks), indices, Expr[])
+    indices
 end
 
-function DJArray(f::Function, nblock::NTuple{N,Int}, pids) where {N}
-    blocks = cvxpmap(Future, DJArray_construct_block, CartesianIndices(nblock), f)
-
+function getindices(id, nblocks::NTuple{N}, blockmap) where {N}
     i1 = [Int[] for i=1:N]
     i2 = [Int[] for i=1:N]
     for idim = 1:N
         _i1 = 1
-        for iblock = 1:nblock[idim]
-            block = blocks[ntuple(_idim->_idim==idim ? iblock : 1, N)...]
-            _i2 = _i1 + remotecall_fetch(DJArray_block_size, block.where, block, idim) - 1
+        for iblock = 1:nblocks[idim]
+            _i2 = _i1 + remotecall_fetch(blocksize_from_id, blockmap[iblock], id, iblock, idim) - 1
             push!(i1[idim], _i1)
             push!(i2[idim], _i2)
             _i1 = _i2 + 1
         end
     end
 
-    indices = Array{NTuple{N,UnitRange{Int}},N}(undef, nblock)
-    for (i,idx) in enumerate(CartesianIndices(nblock))
+    indices = Array{NTuple{N,UnitRange{Int}},N}(undef, nblocks)
+    for (i,idx) in enumerate(CartesianIndices(nblocks))
         indices[idx] = ntuple(idim->i1[idim][idx[idim]]:i2[idim][idx[idim]], N)
     end
 
-    A = remotecall_fetch(DJArray_block_typeof, blocks[1].where, blocks[1])
-    T = eltype(A)
-
-    DJArray{T,N,A}(remotecall(identity, myid(), blocks), indices, Expr[])
+    indices
 end
 
-# DJArray interface implementation <--
-function getblock_updatemaster(iblock, x, newfuture)
-    blocks(x)[iblock] = newfuture
+# JArray serialization implementation <--
+function Serialization.serialize(S::AbstractSerializer, x::JArray{T,N,A}) where {T,N,A}
+    _where = worker_id_from_socket(S.io)
+    Serialization.serialize_type(S, typeof(x))
+    if (_where ∈ x.pids) || (_where == x.id[1])
+        serialize(S, (true, x.id))
+    else
+        serialize(S, (false, x.id))
+        for n in [:pids, :blockmap, :indices, :journal]
+            serialize(S, getfield(x, n))
+        end
+        serialize(S, A)
+    end
+end
+
+function Serialization.deserialize(S::AbstractSerializer, ::Type{T}) where {T<:JArray}
+    what = deserialize(S)
+    id_only = what[1]
+    id = what[2]
+
+    local x
+    if id_only
+        x = registry[id]
+    else
+        pids = deserialize(S)
+        blockmap = deserialize(S)
+        indices = deserialize(S)
+        journal = deserialize(S)
+        A = deserialize(S)
+        localblocks = Union{A,Nothing}[nothing for idx in CartesianIndices(blockmap)]
+        x = T(id, pids, blockmap, localblocks, indices, journal)
+    end
+    x
+end
+# -->
+
+# JArray interface implementation <--
+function getblock_and_delete_fromid!(_id, _whence, iblock)
+    x = registry[_id]
+    blocks = x.localblocks
+    block = copy(blocks[iblock])
+    blocks[iblock] = nothing
+
+    blockmap = x.blockmap
+    blockmap[iblock] = _whence
+
+    block
+end
+
+function update_blockmap_fromid!(_id, _whence, iblock)
+    x = registry[_id]
+    x.blockmap[iblock] = _whence
     nothing
 end
 
-function _getblock(x::DJArray{T,N,A}, iblock::Int) where {T,N,A}
-    _blocks = blocks(x)
-    xblock = fetch(_blocks[iblock])::A
-    _where = _blocks[iblock].where
+function Jets.getblock(x::JArray{T,N,A}, iblock::CartesianIndex) where {T,N,A}
+    _where = x.blockmap[iblock]
     _myid = myid()
-    if _myid != _where
-        _blocks[iblock] = remotecall(identity, _myid, xblock)
-        remotecall_fetch(getblock_updatemaster, 1, iblock, x, _blocks[iblock])
-        @debug "block $iblock moved from $_where to $_myid"
+
+    if _myid == _where
+        return x.localblocks[iblock]
     end
-    xblock
+
+    _id = x.id
+
+    block = remotecall_fetch(getblock_and_delete_fromid!, _where, _id, _myid, iblock)::A
+    x.blockmap[iblock] = _myid
+    x.localblocks[iblock] = block
+
+    pids = x.id[1] ∈ x.pids ? x.pids : [x.pids;x.id[1]]
+    for pid in pids
+        if pid != _myid && pid != _where
+            begin
+                remotecall_fetch(update_blockmap_fromid!, pid, _id, _myid, iblock)
+            end
+        end
+    end
+
+    block
+end
+Jets.getblock(x::JArray, iblock::Int...) = getblock(x, CartesianIndex(iblock))
+
+function setblock_from_id!(id, xblock, iblock)
+    x = registry[id]
+    _xblock = x.localblocks[iblock]
+    _xblock .= xblock
+    nothing
 end
 
-blocks(x::DJArray) = fetch(x.blocks)
+function Jets.setblock!(x::JArray, xblock, iblock::CartesianIndex)
+    if myid() == x.blockmap[iblock]
+        _xblock = x.localblocks[iblock]
+        _xblock .= xblock
+        return nothing
+    end
 
-Jets.indices(x::DJArray) = x.indices
-size_dim(x::DJArray{T,N}, idim) where {T,N} = x.indices[ntuple(_idim->_idim==idim ? size(x.indices)[idim] : 1, N)...][idim][end]
-Base.size(x::DJArray{T,N}) where {T,N} = ntuple(idim->size_dim(x, idim), N)
-Jets.getblock(x::DJArray, iblock::Int...) = _getblock(x, LinearIndices(size(blocks(x)))[iblock...])
-Jets.getblock(x::DJArray, iblock::CartesianIndex) = getblock(x, iblock.I...)
+    remotecall_fetch(setblock_from_id!, x.blockmap[iblock], x.id, xblock, iblock)
+    nothing
+end
+Jets.setblock!(x::JArray, xblock, iblock::Int...) = setblock!(x, xblock, CartesianIndex(iblock))
 
-DJArray_setblock_local!(block, xblock, ::Type{A}) where {A} = fetch(block)::A .= xblock
-_setblock!(x::DJArray{T,N,A}, xblock, iblock::Int) where {T,N,A} = remotecall_fetch(DJArray_setblock_local!, blocks(x)[iblock].where, blocks(x)[iblock], xblock, A)
-Jets.setblock!(x::DJArray, xblock, iblock::Int...) = _setblock!(x, xblock, LinearIndices(size(blocks(x)))[iblock...])
-Jets.setblock!(x::DJArray, xblock, iblock::CartesianIndex) = setblock!(x, xblock, iblock.I...)
+size_dim(x::JArray{T,N}, idim) where {T,N} = x.indices[ntuple(_idim->_idim==idim ? size(x.indices)[idim] : 1, N)...][idim][end]
+Base.size(x::JArray{T,N}) where {T,N} = ntuple(idim->size_dim(x, idim), N)
 
-size_blocks(x::DJArray) = size(blocks(x))
-length_blocks(x::DJArray) = prod(size(blocks(x)))
-Jets.nblocks(x::DJArray) = length_blocks(x)
-
-DJArray_getindex(::Type{A}, block_future, δi) where {A} = getindex(fetch(block_future)::A, δi...)
-function Base.getindex(x::DJArray{T,N,A}, i::Vararg{Int,N}) where {T,N,A}
-    iblock = findfirst(rng->mapreduce(idim->i[idim]∈rng[idim], &, 1:N), indices(x))
-    block_future = blocks(x)[iblock]
+function getindex_from_id(id, iblock, i, N)
+    x = registry[id]
     iₒ = ntuple(idim->indices(x)[iblock][idim][1], N)
-    δi = ntuple(idim->i[idim]-iₒ[idim]+1, N)
-    remotecall_fetch(DJArray_getindex, block_future.where, A, block_future, δi)
+    δ = CartesianIndex(ntuple(idim->i[idim]-iₒ[idim]+1, N))
+    a = x.localblocks[iblock][δ]
+    a
 end
 
-_DJArray_similar_block(iblock, x::DJArray, ::Type{S}) where {S} = similar(getblock(x, iblock), S)
-DJArray_similar_block(iblock, x::DJArray, ::Type{S}) where {S} = remotecall(_DJArray_similar_block, myid(), iblock, x, S)
-DJArray_similar_typeof(block) = typeof(fetch(block))
-function Base.similar(x::DJArray{T,N,A}, ::Type{S}) where {T,N,A,S}
-    _indices = copy(indices(x))
-    _block_futures = cvxpmap(DJArray_similar_block, CartesianIndices(size_blocks(x)), x, S)
-    _A = remotecall_fetch(DJArray_similar_typeof, _block_futures[1].where, _block_futures[1])
-    DJArray{S,N,_A}(remotecall(identity, 1, _block_futures), _indices, Expr[])
+function Base.getindex(x::JArray{T,N}, i::CartesianIndex) where {T,N}
+    iblock = findfirst(rng->mapreduce(idim->i[idim]∈rng[idim], &, 1:N), x.indices)
+    remotecall_fetch(getindex_from_id, x.blockmap[iblock], x.id, iblock, i, N)
+end
+Base.getindex(x::JArray, i::Int...) = getindex(x, CartesianIndex(i))
+
+Base.similar(x::Nothing, ::Type{S}) where {S} = nothing
+function similar_localpart_from_id(id, similar_id, ::Type{A}, N, ::Type{S}) where {A,S}
+    x = registry[id]
+    pids = copy(x.pids)
+    blockmap = copy(x.blockmap)
+    localblocks = Union{Nothing,A}[similar(x.localblocks[idx], S) for idx in CartesianIndices(size(x.blockmap))]
+    indices = copy(x.indices)
+    _x = JArray{S,N,A}(similar_id, pids, blockmap, localblocks, indices, Expr[])
+    registry[similar_id] = _x
+    nothing
 end
 
-DJArray_local_norm(iblock, x::DJArray, p) = norm(getblock(x, iblock), p)
+function Base.similar(x::JArray{T,N,A}, ::Type{S}) where {T,N,A,S}
+    id = x.id
+    similar_id = next_jid()
+    _A = typeof(similar(A(undef,ntuple(_->0,N)), S))
+    for pid in x.pids
+        remotecall_fetch(similar_localpart_from_id, pid, id, similar_id, _A, N, S)
+    end
 
-function LinearAlgebra.norm(x::DJArray{T}, p::Real=2) where {T}
+    if myid() ∈ x.pids
+        @info "similar, 1"
+        _x = registry[similar_id]
+    else
+        pids = copy(x.pids)
+        blockmap = copy(x.blockmap)
+        localblocks = Union{Nothing,_A}[similar(x.localblocks[idx], S) for idx in CartesianIndices(size(x.blockmap))]
+        indices = copy(x.indices)
+        _x = JArray{S,N,_A}(similar_id, pids, blockmap, localblocks, indices, Expr[])
+        registry[similar_id] = _x
+    end
+    _x
+end
+
+Distributed.procs(x::JArray) = x.pids
+Jets.nblocks(x::JArray) = length(x.localblocks)
+
+function Base.collect(x::JArray{T,1,A}) where {T,A}
+    _x = Vector{A}(undef, length(x.localblocks))
+    n = 0
+    @sync for iblock = 1:length(_x)
+        @async begin
+            _x[iblock] = remotecall_fetch(getblock, x.blockmap[iblock], x, iblock)
+        end
+    end
+    Jets.BlockArray(_x, [x.indices[i][1] for i=1:length(x.indices)])
+end
+
+Base.convert(::Type{S}, x::JArray{T,1,A}) where {S<:Jets.BlockArray,T,A} = collect(x)
+Base.convert(::Array, x::JArray{T,1,A}) where {T,A} = convert(Array, collect(x))
+
+JArray_local_norm(iblock, x::JArray, p) = norm(getblock(x, iblock), p)
+function LinearAlgebra.norm(x::JArray{T}, p::Real=2) where {T}
     _T = float(real(T))
-    z = cvxpmap(DJArray_local_norm, 1:length_blocks(x), x, p)
+    z = cvxpmap(JArray_local_norm, 1:length(x.localblocks), x, p)
     if p == Inf
         maximum(z)
     elseif p == -Inf
@@ -129,69 +315,50 @@ function LinearAlgebra.norm(x::DJArray{T}, p::Real=2) where {T}
     end
 end
 
-DJArray_local_dot(iblock, x, y) = dot(getblock(x, iblock), getblock(y, iblock))
-
-function LinearAlgebra.dot(x::DJArray, y::DJArray)
-    z = cvxpmap(DJArray_local_dot, 1:length_blocks(x), x, y)
+JArray_local_dot(iblock, x, y) = dot(getblock(x, iblock), getblock(y, iblock))
+function LinearAlgebra.dot(x::JArray, y::JArray)
+    z = cvxpmap(JArray_local_dot, 1:length(x.localblocks), x, y)
     sum(z)
 end
 
-DJArray_local_extrema(iblock, x::DJArray) = extrema(getblock(x, iblock))
-function Base.extrema(x::DJArray{T}) where {T}
-    mnmx = cvxpmap(DJArray_local_extrema, 1:length_blocks(x), x)
+JArray_local_extrema(iblock, x) = extrema(getblock(x, iblock))
+function Base.extrema(x::JArray)
+    mnmx = cvxpmap(JArray_local_extrema, 1:length(x.localblocks), x)
     mn, mx = mnmx[1]
     for i = 2:length(mnmx)
-        _mn, _mx = extrema(mnmx[i])
+        _mn, _mx = mnmx[i]
         _mn < mn && (mn = _mn)
         _mx > mx && (mx = _mx)
     end
     mn,mx
 end
 
-DJArray_local_fill!(block, a) = fill!(fetch(block), a)
-function Base.fill!(x::DJArray, a)
-    for block in blocks(x)
-        remotecall_fetch(DJArray_local_fill!, block.where, block, a)
-    end
-end
-
-Distributed.procs(x::DJArray) = unique([block.where for block in blocks(x)])
-
-function Base.collect(x::DJArray{T,1,A}) where {T,A}
-    _x = Vector{A}(undef, length_blocks(x))
-    n = 0
-    for iblock = CartesianIndices(size_blocks(x))
-        _x[iblock] = fetch(blocks(x)[iblock])
-    end
-    indicesx = indices(x)
-    Jets.BlockArray(_x, [indicesx[i][1] for i=1:length(indicesx)])
-end
-
-Base.convert(::Type{S}, x::DJArray{T,1,A}) where {S<:Jets.BlockArray,T,A} = collect(x)
-Base.convert(::Array, x::DJArray{T,1,A}) where {T,A} = convert(Array, collect(x))
+JArray_local_fill!(iblock, x, a) = fill!(getblock(x, iblock), a)
+Base.fill!(x::JArray, a) = cvxpmap(JArray_local_fill!, 1:length(x.localblocks), x, a)
 # -->
 
-# DJArray broadcasting implementation --<
-struct DJArrayStyle <: Broadcast.AbstractArrayStyle{1} end
-Base.BroadcastStyle(::Type{<:DJArray}) = DJArrayStyle()
-DJArrayStyle(::Val{1}) = DJArrayStyle()
+# JArray broadcasting implementation --<
+struct JArrayStyle <: Broadcast.AbstractArrayStyle{1} end
+Base.BroadcastStyle(::Type{<:JArray}) = JArrayStyle()
+JArrayStyle(::Val{1}) = JArrayStyle()
 
-Base.similar(bc::Broadcast.Broadcasted{DJArrayStyle}, ::Type{T}) where {T} = similar(find_djarray(bc), T)
-find_djarray(bc::Broadcast.Broadcasted) = find_djarray(bc.args)
-find_djarray(args::Tuple) = find_djarray(find_djarray(args[1]), Base.tail(args))
-find_djarray(x) = x
-find_djarray(a::DJArray, rest) = a
-find_djarray(::Any, rest) = find_djarray(rest)
+Base.similar(bc::Broadcast.Broadcasted{JArrayStyle}, ::Type{T}) where {T} = similar(find_jarray(bc), T)
+find_jarray(bc::Broadcast.Broadcasted) = find_jarray(bc.args)
+find_jarray(args::Tuple) = find_jarray(find_jarray(args[1]), Base.tail(args))
+find_jarray(x) = x
+find_jarray(a::JArray, rest) = a
+find_jarray(::Any, rest) = find_jarray(rest)
 
-Jets.getblock(A::DJArray, ::Type{<:Any}, iblock, indices) = getblock(A, iblock)
+Jets.getblock(A::JArray, ::Type{<:Any}, iblock, indices) = getblock(A, iblock)
 
-function DJArray_bcast_local_copyto!(iblock, dest, bc, S)
-    setblock!(dest, getblock(bc, S, iblock, indices(dest)[iblock][1]), iblock)
+function JArray_bcast_local_copyto!(iblock, dest, bc, S)
+    _x = getblock(bc, S, iblock, dest.indices[iblock][1])
+    setblock!(dest, _x, iblock)
     nothing
 end
-function Base.copyto!(dest::DJArray{T,1,<:AbstractArray{T,N}}, bc::Broadcast.Broadcasted{DJArrayStyle}) where {T,N}
+function Base.copyto!(dest::JArray{T,1,<:AbstractArray{T,N}}, bc::Broadcast.Broadcasted{JArrayStyle}) where {T,N}
     S = Broadcast.DefaultArrayStyle{N}
-    cvxpmap(DJArray_bcast_local_copyto!, 1:length_blocks(dest), dest, bc, S)
+    cvxpmap(JArray_bcast_local_copyto!, 1:length(dest.localblocks), dest, bc, S)
     dest
 end
 # -->
@@ -200,52 +367,54 @@ end
 # JetJSpace
 #
 struct JetJSpace{T,S<:Jets.JetAbstractSpace{T}} <: Jets.JetAbstractSpace{T,1}
-    spaces::DJArray{S,1,Array{S,1}}
+    spaces::JArray{S,1,Array{S,1}}
     indices::Vector{UnitRange{Int}}
 end
 
 JetJSpace_length(iblock, spaces) = length(getblock(spaces, iblock)[1])
 
-function JetJSpace(spaces::DJArray{S,1,A}) where {S<:JetAbstractSpace, A<:AbstractArray{S}}
-    n = cvxpmap(JetJSpace_length, 1:length_blocks(spaces), spaces)
+function JetJSpace(spaces::JArray{S,1,A}) where {S<:JetAbstractSpace, A<:AbstractArray{S}}
+    n = cvxpmap(JetJSpace_length, 1:length(spaces.localblocks), spaces)
     iₒ = 1
     indices = Vector{UnitRange{Int}}(undef, length(spaces))
-    for (iblock,block) in enumerate(blocks(spaces))
+    for iblock = 1:length(indices)
         indices[iblock] = iₒ:(iₒ+n[iblock]-1)
         iₒ = indices[iblock][end] + 1
     end
     JetJSpace(spaces, indices)
 end
 
-Base.size(R::JetJSpace) = (indices(R)[end][end],)
+Jets.indices(R::JetJSpace) = R.indices
+
+Base.size(R::JetJSpace) = (R.indices[end][end],)
 Base.eltype(R::JetSpace{T}) where {T} = T
 Base.eltype(R::Type{JetJSpace{T}}) where {T} = T
 Base.eltype(R::Type{JetJSpace{T,S}}) where {T,S} = T
 
-Jets.indices(R::JetJSpace) = R.indices
 Jets.space(R::JetJSpace, iblock::Integer) = getblock(R.spaces, iblock)[1]
 Jets.nblocks(R::JetJSpace) = length(R.spaces)
 Distributed.procs(R::JetJSpace) = procs(R.spaces)
 
 for f in (:Array, :ones, :rand, :zeros)
-    @eval (Base.$f)(R::JetJSpace) = DJArray(iblock->($f)(space(R, iblock)), (nblocks(R),), procs(R))
+    @eval (Base.$f)(R::JetJSpace) = JArray(iblock->($f)(space(R, iblock[1])), (nblocks(R),), procs(R), typeof(($f)(space(R, 1))))
 end
 
 #
 # Block operator
 #
-JetJBlock_dom(iblock, ops) = domain(getblock(ops, 1, iblock)[1])
-JetJBlock_rng(iblock, ops) = range(getblock(ops, iblock, 1)[1])
+JetJBlock_dom(iblock, ops) = domain(getblock(ops, 1, iblock[1])[1])
+JetJBlock_rng(iblock, ops) = range(getblock(ops, iblock[1], 1)[1])
 JetJBlock_spc_length(iblock, blkspaces) = length(getblock(blkspaces, iblock)[1])
-function Jets.JetBlock(ops::DJArray{T,2}) where {T<:Jop}
+function Jets.JetBlock(ops::JArray{T,2}) where {T<:Jop}
     n1,n2 = size(ops)
 
     local dom
     if n2 == 1
-        dom = remotecall_fetch(JetJBlock_dom, blocks(ops)[1,1].where, 1, ops)
+        dom = remotecall_fetch(JetJBlock_dom, ops.blockmap[1,1], 1, ops)
     else
         indices_dom = Vector{UnitRange{Int}}(undef, n2)
-        blkspaces_dom = DJArray(iblock->[JetJBlock_dom(iblock, ops)], (n2,), workers())
+        typ_dom = typeof(remotecall_fetch(JetJBlock_dom, blocks.blockmap[1,1], 1, ops))
+        blkspaces_dom = JArray(iblock->[JetJBlock_dom(iblock, ops)], (n2,), workers(), Vector{typ_dom})
         n = cvxpmap(Int, JetJBlock_spc_length, 1:n2, blkspaces_dom)
         i1 = 1
         for i = 1:length(n)
@@ -258,10 +427,11 @@ function Jets.JetBlock(ops::DJArray{T,2}) where {T<:Jop}
 
     local rng
     if n1 == 1
-        rng = remotecall_fetch(JetDJBlock_rng, block(ops)[1,1].where, 1, ops)
+        rng = remotecall_fetch(JetJBlock_rng, ops.blockmap[1,1], 1, ops)
     else
         indices_rng = Vector{UnitRange{Int}}(undef, n1)
-        blkspaces_rng = DJArray(iblock->[JetJBlock_rng(iblock, ops)], (n1,), workers())
+        typ_rng = typeof(remotecall_fetch(JetJBlock_rng, ops.blockmap[1,1], 1, ops))
+        blkspaces_rng = JArray(iblock->[JetJBlock_rng(iblock, ops)], (n1,), workers(), Vector{typ_rng})
         n = cvxpmap(Int, JetJBlock_spc_length, 1:n1, blkspaces_rng)
         i1 = 1
         for i = 1:length(n)
@@ -289,7 +459,7 @@ function JetJBlock_local_f!(iblock, d, _m, ops)
     nothing
 end
 
-function JetJBlock_f!(d::DJArray, m::AbstractArray; ops, dom, rng)
+function JetJBlock_f!(d::JArray, m::AbstractArray; ops, kwargs...)
     pids = procs(d)
     _m = bcast(m, addmasterpid(pids))
     cvxpmap(JetJBlock_local_f!, 1:nblocks(d), d, _m, ops)
@@ -304,7 +474,7 @@ function JetJBlock_local_df!(iblock, d, _m, ops)
     nothing
 end
 
-function JetJBlock_df!(d::DJArray, m::AbstractArray; ops, kwargs...)
+function JetJBlock_df!(d::JArray, m::AbstractArray; ops, kwargs...)
     pids = procs(d)
     _m = bcast(m, addmasterpid(pids))
     cvxpmap(JetJBlock_local_df!, 1:nblocks(d), d, _m, ops)
@@ -319,15 +489,15 @@ function JetJBlock_local_df′!(iblock, _m, d, ops)
     nothing
 end
 
-function JetJBlock_df′!(m::AbstractArray, d::DJArray; ops, kwargs...)
+function JetJBlock_df′!(m::AbstractArray, d::JArray; ops, kwargs...)
     pids = procs(d)
     m .= 0
     cvxpmapreduce!(m, JetJBlock_local_df′!, 1:nblocks(d), (d, ops))
 end
 
-function JetJBlock_local_point!(i, j, mₒ)
-    op = getblock(state(j).ops, i)[1]
-    Jets.point!(jet(op), getblock(mₒ, i))
+function JetJBlock_local_point!(iblock, j, mₒ)
+    op = getblock(state(j).ops, iblock)[1]
+    Jets.point!(jet(op), getblock(mₒ, iblock))
     nothing
 end
 
@@ -336,6 +506,6 @@ function Jets.point!(jet::Jet{D,R,typeof(JetJBlock_f!)}, mₒ::AbstractArray) wh
     jet
 end
 
-export DJArray, JetJSpace
+export JArray, JetJSpace
 
 end
