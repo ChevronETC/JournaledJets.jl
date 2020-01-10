@@ -300,3 +300,5 @@ end
     δd = rand(range(J))
     @test J'*δd ≈ _J'*collect(δd)
 end
+
+rmprocs(workers())

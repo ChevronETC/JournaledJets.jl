@@ -1,8 +1,3 @@
-#=
-TODO
-1. add finalizers
-=#
-
 module JournaledJets
 
 using Distributed, Jets, LinearAlgebra, ParallelOperations, Serialization, Schedulers
@@ -13,7 +8,7 @@ let JID::Int = 1
     next_jid() = (id = JID; JID += 1; (myid(),id))
 end
 
-struct JArray{T,N,A<:AbstractArray{T}} <: AbstractArray{T,N}
+mutable struct JArray{T,N,A<:AbstractArray{T}} <: AbstractArray{T,N}
     id::Tuple{Int,Int}
     pids::Vector{Int}
     blockmap::Array{Int,N}
@@ -95,7 +90,25 @@ function JArray(f::Function, nblocks::NTuple{N,Int}, pids, ::Type{A}) where {N,A
         x = JArray{T,N,A}(id, pids, blockmap, localblocks, indices, Expr[])
         registry[id] = x
     end
+
+    finalizer(close, x)
+
     x
+end
+
+function close_by_id(id)
+    println("close_by_id")
+    delete!(registry, id)
+    nothing
+end
+
+function Base.close(x::JArray)
+    println("close")
+    @sync for pid in x.pids
+        @async remotecall_fetch(close_by_id, pid, x.id)
+    end
+    delete!(registry, x.id)
+    nothing
 end
 
 function getindices(id, nblocks::NTuple{1}, blockmap)
@@ -279,6 +292,9 @@ function Base.similar(x::JArray{T,N,A}, ::Type{S}) where {T,N,A,S}
         _x = JArray{S,N,_A}(similar_id, pids, blockmap, localblocks, indices, Expr[])
         registry[similar_id] = _x
     end
+
+    finalizer(close, _x)
+
     _x
 end
 
