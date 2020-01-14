@@ -92,23 +92,29 @@ function JArray(f::Function, nblocks::NTuple{N,Int}, pids) where {N}
         registry[id] = x
     end
 
-    #finalizer(close, x)
+    finalizer(close, x)
 
     x
 end
 
 function close_by_id(id)
-    println("close_by_id")
-    delete!(registry, id)
+    #ccall(:printf, Cvoid, (Cstring,), "close_by_id\n")
+    if id ∈ keys(registry)
+        delete!(registry, id)
+    end
     nothing
 end
 
 function Base.close(x::JArray)
-    println("close")
+    #ccall(:printf, Cvoid, (Cstring,), "close\n")
     @sync for pid in x.pids
-        @async remotecall_fetch(close_by_id, pid, x.id)
+        if pid ∈ workers()
+            @async remotecall_fetch(close_by_id, pid, x.id)
+        end
     end
-    delete!(registry, x.id)
+    if x.id ∈ keys(registry)
+        delete!(registry, x.id)
+    end
     nothing
 end
 
