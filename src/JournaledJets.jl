@@ -55,9 +55,10 @@ function finish_local_part(id, indices)
     nothing
 end
 
-function JArray(f::Function, nblocks::NTuple{N,Int}, pids, ::Type{A}) where {N,A<:AbstractArray}
+function JArray(f::Function, nblocks::NTuple{N,Int}, pids) where {N}
     id = next_jid()
 
+    A = Base.return_types(f, (CartesianIndex{N},))[1]
     T = eltype(A)
     @sync for pid in pids
         @async remotecall_fetch(initialize_local_part, pid, id, pids, nblocks, A)
@@ -91,7 +92,7 @@ function JArray(f::Function, nblocks::NTuple{N,Int}, pids, ::Type{A}) where {N,A
         registry[id] = x
     end
 
-    finalizer(close, x)
+    #finalizer(close, x)
 
     x
 end
@@ -293,7 +294,7 @@ function Base.similar(x::JArray{T,N,A}, ::Type{S}) where {T,N,A,S}
         registry[similar_id] = _x
     end
 
-    finalizer(close, _x)
+    #finalizer(close, _x)
 
     _x
 end
@@ -412,7 +413,7 @@ Jets.nblocks(R::JetJSpace) = length(R.spaces)
 Distributed.procs(R::JetJSpace) = procs(R.spaces)
 
 for f in (:Array, :ones, :rand, :zeros)
-    @eval (Base.$f)(R::JetJSpace) = JArray(iblock->($f)(space(R, iblock[1])), (nblocks(R),), procs(R), typeof(($f)(space(R, 1))))
+    @eval (Base.$f)(R::JetJSpace) = JArray(iblock->($f)(space(R, iblock[1])), (nblocks(R),), procs(R))
 end
 
 #
@@ -429,8 +430,7 @@ function Jets.JetBlock(ops::JArray{T,2}) where {T<:Jop}
         dom = remotecall_fetch(JetJBlock_dom, ops.blockmap[1,1], 1, ops)
     else
         indices_dom = Vector{UnitRange{Int}}(undef, n2)
-        typ_dom = typeof(remotecall_fetch(JetJBlock_dom, blocks.blockmap[1,1], 1, ops))
-        blkspaces_dom = JArray(iblock->[JetJBlock_dom(iblock, ops)], (n2,), workers(), Vector{typ_dom})
+        blkspaces_dom = JArray(iblock->[JetJBlock_dom(iblock, ops)], (n2,), workers())
         n = cvxpmap(Int, JetJBlock_spc_length, 1:n2, blkspaces_dom)
         i1 = 1
         for i = 1:length(n)
@@ -446,8 +446,7 @@ function Jets.JetBlock(ops::JArray{T,2}) where {T<:Jop}
         rng = remotecall_fetch(JetJBlock_rng, ops.blockmap[1,1], 1, ops)
     else
         indices_rng = Vector{UnitRange{Int}}(undef, n1)
-        typ_rng = typeof(remotecall_fetch(JetJBlock_rng, ops.blockmap[1,1], 1, ops))
-        blkspaces_rng = JArray(iblock->[JetJBlock_rng(iblock, ops)], (n1,), workers(), Vector{typ_rng})
+        blkspaces_rng = JArray(iblock->[JetJBlock_rng(iblock, ops)], (n1,), workers())
         n = cvxpmap(Int, JetJBlock_spc_length, 1:n1, blkspaces_rng)
         i1 = 1
         for i = 1:length(n)
@@ -457,7 +456,7 @@ function Jets.JetBlock(ops::JArray{T,2}) where {T<:Jop}
         end
         rng = JetJSpace(blkspaces_rng, indices_rng)
     end
-    Jet(dom = dom, rng = rng, f! = JetJBlock_f!, df! = JetJBlock_df!, df′! = JetJBlock_df′!, s = (ops=ops, dom=dom, rng=rng))
+    Jet(dom = dom, rng = rng, f! = JetJBlock_f!, df! = JetJBlock_df!, df′! = JetJBlock_df′!, s = (ops=ops,))
 end
 
 function addmasterpid(pids)

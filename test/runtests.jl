@@ -12,28 +12,28 @@ addprocs(3)
 end
 
 @testset "JArray construct, 1D" begin
-    x = JArray(foo, (3,), workers(), Array{Float64,1});
+    x = JArray(foo, (3,), workers())
     @test typeof(x) == JArray{Float64, 1, Vector{Float64}}
 end
 
 @testset "JArray construct, 2D" begin
-    x = JArray(bar, (3,2), workers(), Array{Float64,2});
+    x = JArray(bar, (3,2), workers())
     @test typeof(x) == JArray{Float64, 2, Array{Float64,2}}
 end
 
 @testset "JArray size, 1D" begin
-    x = JArray(foo, (3,), workers(), Vector{Float64});
+    x = JArray(foo, (3,), workers())
     @test size(x) == (6,)
     @test length(x) == 6
 end
 
 @testset "JArray size, 2D" begin
-    x = JArray(bar, (3,4), workers(), Array{Float64,2});
+    x = JArray(bar, (3,4), workers())
     @test size(x) == (6,12)
 end
 
 @testset "JArray getblock, 1D" begin
-    x = JArray(foo, (3,), workers(), Vector{Float64});
+    x = JArray(foo, (3,), workers())
     getblock(x,1)
     for i = 1:3
         @test getblock(x, i) ≈ i*ones(2)
@@ -41,7 +41,7 @@ end
 end
 
 @testset "JArray getblock, 2D" begin
-    x = JArray(bar, (3,4), workers(), Array{Float64,2});
+    x = JArray(bar, (3,4), workers())
     for jblock = 1:4, iblock = 1:3
         xᵢⱼ = getblock(x, iblock, jblock)
         @test xᵢⱼ ≈ LinearIndices((3,4))[iblock,jblock]*ones(2,3)
@@ -49,7 +49,7 @@ end
 end
 
 @testset "JArray setblock!, 1D" begin
-    x = JArray(foo, (3,), workers(), Vector{Float64});
+    x = JArray(foo, (3,), workers())
     for iblock = 1:3
         setblock!(x, 2*iblock*ones(2), iblock)
         xᵢ = getblock(x, iblock)
@@ -58,7 +58,7 @@ end
 end
 
 @testset "JArray setblock!, 2D" begin
-    x = JArray(bar, (3,4), workers(), Array{Float64,2});
+    x = JArray(bar, (3,4), workers())
     for jblock = 1:4, iblock = 1:3
         setblock!(x, 2*LinearIndices((3,4))[iblock,jblock]*ones(2,3), iblock, jblock)
         xᵢⱼ = getblock(x, iblock, jblock)
@@ -67,7 +67,7 @@ end
 end
 
 @testset "JArray getindex, 1D" begin
-    x = JArray(foo, (3,), workers(), Vector{Float64})
+    x = JArray(foo, (3,), workers())
     for i = 1:length(x)
         if i <= 2
             @test x[i] ≈ 1
@@ -80,7 +80,7 @@ end
 end
 
 @testset "JArray getindex, 2D" begin
-    x = JArray(bar, (3,2), workers(), Array{Float64,2})
+    x = JArray(bar, (3,2), workers())
     for j = 1:size(x,2), i = 1:size(x,1)
         if 1 <= i <= 2 && 1 <= j <= 3
             @test x[i,j] ≈ 1
@@ -99,7 +99,7 @@ end
 end
 
 @testset "JArray similar, 1D" begin
-    x = JArray(i->rand(2), (3,), workers(), Vector{Float64})
+    x = JArray(i->rand(2), (3,), workers())
     y = similar(x)
     z = similar(x, Float32)
     @test length(x) == length(y)
@@ -110,7 +110,7 @@ end
 end
 
 @testset "JArray similar, 2D" begin
-    x = JArray(i->rand(2,3), (3,2), workers(), Array{Float64,2})
+    x = JArray(i->rand(2,3), (3,2), workers())
     y = similar(x)
     z = similar(x, Float32)
     @test length(x) == length(y)
@@ -123,12 +123,12 @@ end
 end
 
 @testset "JArray procs" begin
-    x = JArray(i->rand(2), (3,), workers(), Vector{Float64})
+    x = JArray(i->rand(2), (3,), workers())
     @test procs(x) == workers()
 end
 
 @testset "DJArray collect/convert, 1D" begin
-    x = JArray(i->rand(2), (3,), workers(), Vector{Float64})
+    x = JArray(i->rand(2), (3,), workers())
     y = collect(x)
     z = convert(Jets.BlockArray, x)
     u = convert(Array, x)
@@ -145,7 +145,7 @@ end
 
 @testset "JArray norm, 1D" begin
     x = rand(90)
-    y = JArray(i->x[(i[1]-1)*30+1:i[1]*30], (3,), workers(), Vector{Float64})
+    y = JArray(i->x[(i[1]-1)*30+1:i[1]*30], (3,), workers())
     z = collect(y)
     @test x ≈ z
 
@@ -158,8 +158,8 @@ end
 @testset "JArray dot, 1D" begin
     x₁ = rand(90)
     x₂ = rand(90)
-    y₁ = JArray(i->x₁[(i[1]-1)*30+1:i[1]*30], (3,), workers(), Vector{Float64})
-    y₂ = JArray(i->x₂[(i[1]-1)*30+1:i[1]*30], (3,), workers(), Vector{Float64})
+    y₁ = JArray(i->x₁[(i[1]-1)*30+1:i[1]*30], (3,), workers())
+    y₂ = JArray(i->x₂[(i[1]-1)*30+1:i[1]*30], (3,), workers())
     z₁ = collect(y₁)
     z₂ = collect(y₂)
     @test x₁ ≈ z₁
@@ -169,7 +169,7 @@ end
 
 @testset "JArray extrema, 1D" begin
     x = rand(90)
-    y = JArray(i->x[(i[1]-1)*30+1:i[1]*30], (3,), workers(), Vector{Float64})
+    y = JArray(i->x[(i[1]-1)*30+1:i[1]*30], (3,), workers())
     z = collect(y)
     mnmx = extrema(y)
     _mnmx = extrema(x)
@@ -178,7 +178,7 @@ end
 end
 
 @testset "JArray fill!, 1D" begin
-    y = JArray(i->zeros(30), (3,), workers(), Vector{Float64})
+    y = JArray(i->zeros(30), (3,), workers())
     y .= 3
     z = collect(y)
     for i = 1:90
@@ -187,9 +187,9 @@ end
 end
 
 @testset "JArray broadcasting" begin
-    u = JArray(i->rand(10), (4,), workers(), Vector{Float64})
-    v = JArray(i->rand(10), (4,), workers(), Vector{Float64})
-    w = JArray(i->rand(10), (4,), workers(), Vector{Float64})
+    u = JArray(i->rand(10), (4,), workers())
+    v = JArray(i->rand(10), (4,), workers())
+    w = JArray(i->rand(10), (4,), workers())
     a = rand(Float64)
     b = rand(Float64)
     c = rand(Float64)
@@ -200,7 +200,7 @@ end
     _w = collect(w)
     @test a*_u .+ b*_v .+ c*_w ≈ collect(x)
 
-    y = JArray(i->zeros(10), (4,), workers(), Vector{Float64})
+    y = JArray(i->zeros(10), (4,), workers())
     y .= x
     @test typeof(y) == JournaledJets.JArray{Float64,1,Array{Float64,1}}
     @test a*_u .+ b*_v .+ c*_w ≈ collect(y)
@@ -210,7 +210,7 @@ end
     @test a*_u .+ b*_v .+ c*_w ≈ z
 
     x = rand(Int32, 40)
-    y = JArray(i->rand(10), (4,), workers(), Vector{Float64})
+    y = JArray(i->rand(10), (4,), workers())
     z = x .* y
     @test isa(z, JournaledJets.JArray)
 
@@ -220,44 +220,44 @@ end
 end
 
 @testset "JetJSpace construct" begin
-    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers(), Vector{JetSpace{Float64,1}}))
+    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers()))
     @test isa(R, JetJSpace)
 end
 
 @testset "JetJSpace size" begin
-    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers(), Vector{JetSpace{Float64,1}}))
+    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers()))
     @test size(R) == (50,)
 end
 
 @testset "JetJSpace eltype" begin
-    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers(), Vector{JetSpace{Float64,1}}))
+    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers()))
     @test eltype(R) == Float64
 end
 
 @testset "JetJSpace indices" begin
-    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers(), Vector{JetSpace{Float64,1}}))
+    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers()))
     @test indices(R) == [1:10, 11:20, 21:30, 31:40, 41:50]
 end
 
 @testset "JetJSpace space" begin
-    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers(), Vector{JetSpace{Float64,1}}))
+    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers()))
     @test space(R, 2) == JetSpace(Float64,10)
 end
 
 @testset "JetJSpace nblocks" begin
-    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers(), Vector{JetSpace{Float64,1}}))
+    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers()))
     @test nblocks(R) == 5
 end
 
 @testset "JetJSpace Array" begin
-    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers(), Vector{JetSpace{Float64,1}}))
+    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers()))
     x = Array(R)
     @test isa(x, JArray)
     @test size(x) == (50,)
 end
 
 @testset "JetJSpace ones" begin
-    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers(), Vector{JetSpace{Float64,1}}))
+    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers()))
     x = ones(R)
     @test isa(x, JArray)
     @test size(x) == (50,)
@@ -265,7 +265,7 @@ end
 end
 
 @testset "JetJSpace zeros" begin
-    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers(), Vector{JetSpace{Float64,1}}))
+    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers()))
     x = zeros(R)
     @test isa(x, JArray)
     @test size(x) == (50,)
@@ -273,17 +273,17 @@ end
 end
 
 @testset "JetJSpace rand" begin
-    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers(), Vector{JetSpace{Float64,1}}))
+    R = JetJSpace(JArray(_->[JetSpace(Float64,10)], (5,), workers()))
     x = rand(R)
     @test isa(x, JArray)
     @test size(x) == (50,)
 end
 
 @testset "block operator, tall and skinny" begin
-    A = @blockop JArray(i->[JopBar(10)], (4,1), workers(), Vector{typeof(JopBar(10))})
+    A = @blockop JArray(i->[JopBar(10)], (4,1), workers())
     @test isa(A, Jop)
 
-    _F  = JArray(_->[JopBar(10)], (4,1), workers(), Vector{typeof(JopBar(10))})
+    _F  = JArray(_->[JopBar(10)], (4,1), workers())
     F = @blockop _F
 
     _G = [_F[i,1] for i in 1:4, j in 1:1]
