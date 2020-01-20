@@ -55,7 +55,8 @@ function finish_local_part(id, indices)
     nothing
 end
 
-function JArray(f::Function, nblocks::NTuple{N,Int}, pids) where {N}
+function JArray(f::Function, nblocks::NTuple{N,Int}) where {N}
+    pids = workers()
     id = next_jid()
 
     A = Base.return_types(f, (CartesianIndex{N},))[1]
@@ -64,7 +65,7 @@ function JArray(f::Function, nblocks::NTuple{N,Int}, pids) where {N}
         @async remotecall_fetch(initialize_local_part, pid, id, pids, nblocks, A)
     end
 
-    cvxpmap(fill_local_part, CartesianIndices(nblocks), id, f)
+    cvxpmap(fill_local_part, CartesianIndices(nblocks), id, f; pids=pids)
 
     blockmap = zeros(Int, nblocks)
     x = ArrayFutures(blockmap)
@@ -99,7 +100,7 @@ end
 
 function close_by_id(id)
     #ccall(:printf, Cvoid, (Cstring,), "close_by_id\n")
-    if id ∈ keys(registry)
+    if haskey(registry, id)
         delete!(registry, id)
     end
     nothing
@@ -107,12 +108,10 @@ end
 
 function Base.close(x::JArray)
     #ccall(:printf, Cvoid, (Cstring,), "close\n")
-    @sync for pid in x.pids
-        if pid ∈ workers()
-            @async remotecall_fetch(close_by_id, pid, x.id)
-        end
+    @sync for pid in workers()
+        @async remotecall_fetch(close_by_id, pid, x.id)
     end
-    if x.id ∈ keys(registry)
+    if haskey(registry, x.id)
         delete!(registry, x.id)
     end
     nothing
@@ -151,21 +150,21 @@ function getindices(id, nblocks::NTuple{N}, blockmap) where {N}
 end
 
 # JArray serialization implementation <--
-function Serialization.serialize(S::AbstractSerializer, x::JArray{T,N,A}) where {T,N,A}
+function Serialization.serialize(S::AbstractSerializer, x::JArray{T,N}) where {T,N}
     _where = worker_id_from_socket(S.io)
+
     Serialization.serialize_type(S, typeof(x))
-    if (_where ∈ x.pids) || (_where == x.id[1])
+    if _where ∈ x.pids || _where == x.id[1]
         serialize(S, (true, x.id))
     else
         serialize(S, (false, x.id))
         for n in [:pids, :blockmap, :indices, :journal]
             serialize(S, getfield(x, n))
         end
-        serialize(S, A)
     end
 end
 
-function Serialization.deserialize(S::AbstractSerializer, ::Type{T}) where {T<:JArray}
+function Serialization.deserialize(S::AbstractSerializer, ::Type{J}) where {T,N,A,J<:JArray{T,N,A}}
     what = deserialize(S)
     id_only = what[1]
     id = what[2]
@@ -178,10 +177,11 @@ function Serialization.deserialize(S::AbstractSerializer, ::Type{T}) where {T<:J
         blockmap = deserialize(S)
         indices = deserialize(S)
         journal = deserialize(S)
-        A = deserialize(S)
         localblocks = Union{A,Nothing}[nothing for idx in CartesianIndices(blockmap)]
-        x = T(id, pids, blockmap, localblocks, indices, journal)
+        x = J(id, pids, blockmap, localblocks, indices, journal)
+        registry[id] = x
     end
+
     x
 end
 # -->
@@ -190,18 +190,27 @@ end
 function getblock_and_delete_fromid!(_id, _whence, iblock)
     x = registry[_id]
     blocks = x.localblocks
-    block = copy(blocks[iblock])
+    block = copy(blocks[iblock]) # TODO... is this copy needed?
     blocks[iblock] = nothing
 
     blockmap = x.blockmap
     blockmap[iblock] = _whence
 
+    if _whence ∉ x.pids
+        sort!(push!(x.pids, _whence))
+    end
+
     block
 end
 
-function update_blockmap_fromid!(_id, _whence, iblock)
-    x = registry[_id]
-    x.blockmap[iblock] = _whence
+function update_blockmap_and_pids_fromid!(_id, _whence, iblock)
+    if haskey(registry, _id)
+        x = registry[_id]
+        x.blockmap[iblock] = _whence
+        if _whence ∉ x.pids
+            sort!(push!(x.pids, _whence))
+        end
+    end
     nothing
 end
 
@@ -219,12 +228,13 @@ function Jets.getblock(x::JArray{T,N,A}, iblock::CartesianIndex) where {T,N,A}
     x.blockmap[iblock] = _myid
     x.localblocks[iblock] = block
 
-    pids = x.id[1] ∈ x.pids ? x.pids : [x.pids;x.id[1]]
-    for pid in pids
+    if _myid ∉ x.pids
+        sort!(push!(x.pids, _myid))
+    end
+
+    for pid in procs()
         if pid != _myid && pid != _where
-            begin
-                remotecall_fetch(update_blockmap_fromid!, pid, _id, _myid, iblock)
-            end
+            remotecall_fetch(update_blockmap_and_pids_fromid!, pid, _id, _myid, iblock)
         end
     end
 
@@ -269,30 +279,30 @@ end
 Base.getindex(x::JArray, i::Int...) = getindex(x, CartesianIndex(i))
 
 Base.similar(x::Nothing, ::Type{S}) where {S} = nothing
-function similar_localpart_from_id(id, similar_id, ::Type{A}, N, ::Type{S}) where {A,S}
-    x = registry[id]
-    pids = copy(x.pids)
-    blockmap = copy(x.blockmap)
-    localblocks = Union{Nothing,A}[similar(x.localblocks[idx], S) for idx in CartesianIndices(size(x.blockmap))]
-    indices = copy(x.indices)
-    _x = JArray{S,N,A}(similar_id, pids, blockmap, localblocks, indices, Expr[])
-    registry[similar_id] = _x
+function similar_localpart_from_id(id, pids, similar_id, ::Type{A}, N, ::Type{S}) where {A,S}
+    if haskey(registry, id)
+        x = registry[id]
+        blockmap = copy(x.blockmap)
+        localblocks = Union{Nothing,A}[similar(x.localblocks[idx], S) for idx in CartesianIndices(size(x.blockmap))]
+        indices = copy(x.indices)
+        _x = JArray{S,N,A}(similar_id, pids, blockmap, localblocks, indices, Expr[])
+        registry[similar_id] = _x
+    end
     nothing
 end
 
 function Base.similar(x::JArray{T,N,A}, ::Type{S}) where {T,N,A,S}
     id = x.id
+    pids = x.pids
     similar_id = next_jid()
     _A = typeof(similar(A(undef,ntuple(_->0,N)), S))
-    for pid in x.pids
-        remotecall_fetch(similar_localpart_from_id, pid, id, similar_id, _A, N, S)
+    for pid in workers()
+        remotecall_fetch(similar_localpart_from_id, pid, id, pids, similar_id, _A, N, S)
     end
 
-    if myid() ∈ x.pids
-        @info "similar, 1"
+    if haskey(registry, similar_id)
         _x = registry[similar_id]
     else
-        pids = copy(x.pids)
         blockmap = copy(x.blockmap)
         localblocks = Union{Nothing,_A}[similar(x.localblocks[idx], S) for idx in CartesianIndices(size(x.blockmap))]
         indices = copy(x.indices)
@@ -300,7 +310,7 @@ function Base.similar(x::JArray{T,N,A}, ::Type{S}) where {T,N,A,S}
         registry[similar_id] = _x
     end
 
-    #finalizer(close, _x)
+    finalizer(close, _x)
 
     _x
 end
@@ -419,7 +429,7 @@ Jets.nblocks(R::JetJSpace) = length(R.spaces)
 Distributed.procs(R::JetJSpace) = procs(R.spaces)
 
 for f in (:Array, :ones, :rand, :zeros)
-    @eval (Base.$f)(R::JetJSpace) = JArray(iblock->($f)(space(R, iblock[1])), (nblocks(R),), procs(R))
+    @eval (Base.$f)(R::JetJSpace) = JArray(iblock->($f)(space(R, iblock[1])), (nblocks(R),))
 end
 
 #
@@ -436,7 +446,7 @@ function Jets.JetBlock(ops::JArray{T,2}) where {T<:Jop}
         dom = remotecall_fetch(JetJBlock_dom, ops.blockmap[1,1], 1, ops)
     else
         indices_dom = Vector{UnitRange{Int}}(undef, n2)
-        blkspaces_dom = JArray(iblock->[JetJBlock_dom(iblock, ops)], (n2,), workers())
+        blkspaces_dom = JArray(iblock->[JetJBlock_dom(iblock, ops)], (n2,))
         n = cvxpmap(Int, JetJBlock_spc_length, 1:n2, blkspaces_dom)
         i1 = 1
         for i = 1:length(n)
@@ -452,7 +462,7 @@ function Jets.JetBlock(ops::JArray{T,2}) where {T<:Jop}
         rng = remotecall_fetch(JetJBlock_rng, ops.blockmap[1,1], 1, ops)
     else
         indices_rng = Vector{UnitRange{Int}}(undef, n1)
-        blkspaces_rng = JArray(iblock->[JetJBlock_rng(iblock, ops)], (n1,), workers())
+        blkspaces_rng = JArray(iblock->[JetJBlock_rng(iblock, ops)], (n1,))
         n = cvxpmap(Int, JetJBlock_spc_length, 1:n1, blkspaces_rng)
         i1 = 1
         for i = 1:length(n)
@@ -481,8 +491,7 @@ function JetJBlock_local_f!(iblock, d, _m, ops)
 end
 
 function JetJBlock_f!(d::JArray, m::AbstractArray; ops, kwargs...)
-    pids = procs(d)
-    _m = bcast(m, addmasterpid(pids))
+    _m = bcast(m, procs())
     cvxpmap(JetJBlock_local_f!, 1:nblocks(d), d, _m, ops)
     d
 end
@@ -496,8 +505,7 @@ function JetJBlock_local_df!(iblock, d, _m, ops)
 end
 
 function JetJBlock_df!(d::JArray, m::AbstractArray; ops, kwargs...)
-    pids = procs(d)
-    _m = bcast(m, addmasterpid(pids))
+    _m = bcast(m, procs())
     cvxpmap(JetJBlock_local_df!, 1:nblocks(d), d, _m, ops)
     d
 end
@@ -511,7 +519,6 @@ function JetJBlock_local_df′!(iblock, _m, d, ops)
 end
 
 function JetJBlock_df′!(m::AbstractArray, d::JArray; ops, kwargs...)
-    pids = procs(d)
     m .= 0
     cvxpmapreduce!(m, JetJBlock_local_df′!, 1:nblocks(d), (d, ops))
 end
