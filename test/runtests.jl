@@ -1,3 +1,4 @@
+using Revise
 using Distributed
 addprocs(3)
 @everywhere using Distributed, Jets, JournaledJets, LinearAlgebra, Test
@@ -5,10 +6,10 @@ addprocs(3)
 @everywhere foo(iblock) = prod(iblock.I) * ones(2)
 @everywhere bar(iblock) = LinearIndices((3,4))[iblock[1],iblock[2]] * ones(2,3)
 
-@everywhere JopBar_f!(d,m) = d .= m.^2
-@everywhere JopBar_df!(δd,δm;mₒ,kwargs...) = δd .= 2 .* mₒ .* δm
-@everywhere function JopBar(n) spc = JetSpace(Float64, n)
-    JopNl(f! = JopBar_f!, df! = JopBar_df!, df′! = JopBar_df!, dom = spc, rng = spc)
+@everywhere JopBar_f!(d,m;x) = d .= x[1] .* m.^2
+@everywhere JopBar_df!(δd,δm;mₒ,x,kwargs...) = δd .= 2 .* x[1] .* mₒ .* δm
+@everywhere function JopBar(n,x=[1.0]) spc = JetSpace(Float64, n)
+    JopNl(f! = JopBar_f!, df! = JopBar_df!, df′! = JopBar_df!, dom = spc, rng = spc, s=(x=x,))
 end
 
 @testset "JArray construct, 1D" begin
@@ -352,5 +353,116 @@ end
     close(y)
     rmprocs(workers()[4:6])
 end
+
+#@testset "journal, broadcasting" begin # TODO - does not work inside a test-set
+######
+######
+___x = @journal JArray(i->i.I[1]*ones(2), (2,))
+___y = @journal JArray(i->2*i.I[1]*ones(2), (2,))
+@journal ___y ___y .*= 2
+@journal ___y ___y .*= 2*___x .+ ___y
+@journal ___y ___y .*= 2*___x .+ 3*___y
+
+____y = copy(___y)
+___y .= 0
+@replay ___y 1
+@test getblock(___y, 1) ≈ getblock(____y, 1)
+@test (getblock(___y, 2) ≈ getblock(____y, 1)) == false
+@replay ___y 2
+@test getblock(___y, 2) ≈  getblock(____y, 2)
+
+___y .= @journal :reset ___y 2*___x
+@test length(___y.journal) == 2
+
+____y = copy(___y)
+___y .= 0
+@replay ___y 1
+@test getblock(___y, 1) ≈ getblock(____y, 1)
+@test (getblock(___y, 2) ≈ getblock(____y, 1)) == false
+@replay ___y 2
+@test getblock(___y, 2) ≈  getblock(____y, 2)
+######
+######
+#end
+
+#@testset "journal, single block" begin  # TODO - does not work inside a test-set
+######
+######
+x = @journal JArray(i->ones(2), (2,))
+
+@journal x begin
+    _x = getblock(x,1)
+    _x[1] = π
+end
+
+x .= 0
+@replay x 1
+@test getblock(x, 1) ≈ [π, 1]
+
+@replay x 2
+@test getblock(x, 2) ≈ [1, 1]
+######
+######
+#end
+
+#@testset "journal, mul!, single operator"
+######
+######
+A = @blockop @journal JArray(_->[JopBar(2)], (2,1))
+x = rand(domain(A))
+
+y = @journal zeros(range(A))
+@journal y mul!(y, A, x)
+
+_y = copy(y)
+y .= 0
+
+@test (y ≈ _y) == false
+@replay y 1
+@replay y 2
+@test y ≈ _y
+
+A₁₁ = getblock(A, 1, 1)
+state(A₁₁).x[1] = 2.0
+mul!(y, A, x)
+@test (y ≈ _y) == false
+
+@replay A 1
+
+mul!(y, A, x)
+@test y ≈ _y
+######
+######
+#end
+
+#@testset "journal, mul!, composite operator" begin
+######
+######
+A = @blockop @journal JArray(_->[JopBar(2) ∘ JopBar(2)], (2,1))
+x = rand(domain(A))
+
+y = @journal zeros(range(A))
+y = @journal y mul!(y, A, x)
+
+_y = copy(y)
+y .= 0
+
+@replay y 1
+@replay y 2
+@test y ≈ _y
+
+A₁₁ = getblock(A, 1, 1)
+A₁₁₁ = state(A₁₁).ops[1]
+state(A₁₁₁).x[1] = 2.0
+mul!(y, A, x)
+@test (y ≈ _y) == false
+
+@replay A 1
+
+mul!(y, A, x)
+@test y ≈ _y
+######
+######
+#end
 
 rmprocs(workers())

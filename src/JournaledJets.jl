@@ -203,6 +203,20 @@ function getblock_and_delete_fromid!(_id, _whence, iblock)
     block
 end
 
+function block_delete_fromid!(_id, _whence, iblock)
+    x = registry[_id]
+    blocks = x.localblocks
+    blocks[iblock] = nothing
+
+    blockmap = x.blockmap
+    blockmap[iblock] = _whence
+
+    if _whence ∉ x.pids
+        sort!(push!(x.pids, _whence))
+    end
+    nothing
+end
+
 function update_blockmap_and_pids_fromid!(_id, _whence, iblock)
     if haskey(registry, _id)
         x = registry[_id]
@@ -219,7 +233,7 @@ function Jets.getblock(x::JArray{T,N,A}, iblock::CartesianIndex) where {T,N,A}
     _myid = myid()
 
     if _myid == _where
-        return x.localblocks[iblock]
+        return x.localblocks[iblock]::A
     end
 
     _id = x.id
@@ -367,7 +381,17 @@ function Base.extrema(x::JArray)
 end
 
 JArray_local_fill!(iblock, x, a) = fill!(getblock(x, iblock), a)
-Base.fill!(x::JArray, a) = cvxpmap(JArray_local_fill!, 1:length(x.localblocks), x, a)
+function Base.fill!(x::JArray, a)
+    cvxpmap(JArray_local_fill!, 1:length(x.localblocks), x, a)
+    x
+end
+
+function Base.copy(x::JArray{T,N,A}) where {T,N,A}
+    _x = JArray(i->copy(getblock(x,i))::A, size(x.localblocks))
+    _x.journal = deepcopy(x.journal)
+    _x
+end
+Base.deepcopy(x::JArray) = copy(x)
 # -->
 
 # JArray broadcasting implementation --<
@@ -534,6 +558,193 @@ function Jets.point!(jet::Jet{D,R,typeof(JetJBlock_f!)}, mₒ::AbstractArray) wh
     jet
 end
 
-export JArray, JetJSpace
+Jets.getblock(jet::Jet{D,R,typeof(JetJBlock_f!)}, i, j) where {D,R} = state(jet).ops[i,j]
+Jets.getblock(A::JopLn{T}, i, j) where {T<:Jet{<:JetAbstractSpace,<:JetAbstractSpace,typeof(JetJBlock_f!)}} = JopLn(getblock(jet(A), i, j))
+Jets.getblock(A::JopNl{T}, i, j) where {T<:Jet{<:JetAbstractSpace,<:JetAbstractSpace,typeof(JetJBlock_f!)}} = getblock(jet(A), i, j)
+Jets.getblock(A::T, i, j) where {J<:Jet{<:JetAbstractSpace,<:JetAbstractSpace,typeof(JetJBlock_f!)},T<:JopAdjoint{J}} = getblock(A.op, j, i)'
+Jets.getblock(::Type{JopNl}, A::Jop{T}, i, j) where {T<:Jet{<:JetAbstractSpace,<:JetAbstractSpace,typeof(JetJBlock_f!)}} = getblock(jet(A), i, j)::JopNl
+Jets.getblock(::Type{JopLn}, A::Jop{T}, i, j) where {T<:Jet{<:JetAbstractSpace,<:JetAbstractSpace,typeof(JetJBlock_f!)}} = JopLn(getblock(jet(A), i, j))
+
+#
+# Journal
+#
+
+# partial operator for journal replay
+function JetJSubBlock_f!(d::AbstractArray, m::AbstractArray; ops, iblock, kwargs...)
+    opsᵢ = getblock(ops, iblock, 1)[1]
+    mul!(d, opsᵢ, m)
+    d
+end
+
+function JetJSubBlock_df!(d::AbstractArray, m::AbstractArray; ops, iblock, kwargs...)
+    opsᵢ = getblock(ops, iblock, 1)[1]
+    mul!(d, JopLn(jet(opsᵢ)), m)
+    d
+end
+
+journal_getblock(x::JArray{T}, iblock::CartesianIndex) where {T} = getblock(x, iblock)
+journal_getblock(x::JopNl, iblock::CartesianIndex) = JopNl(journal_getblock(jet(x), iblock))
+journal_getblock(x::JopLn, iblock::CartesianIndex) = JopLn(journal_getblock(jet(x), iblock))
+#journal_getblock(x, iblock::CartesianIndex) = x
+journal_getblock(x, iblock::Int) = journal_getblock(x, CartesianIndex(iblock))
+
+function journal_getblock(x::Jet, iblock::CartesianIndex)
+    dom = domain(x)
+    rng = range(getblock(state(x).ops, iblock.I[1], 1)[1])
+    Jet(;dom = dom, rng = rng, f! = JetJSubBlock_f!, df! = JetJSubBlock_df!, df′! = _->@info("not implemented"), s=(ops=state(x).ops, iblock=iblock.I[1]))
+end
+
+journal!(x::JArray, expr) = push!(x.journal, expr)
+journal!(x::Jop, expr) = journal!(state(x).ops, expr)
+
+emptyjournal!(x::JArray) = x.journal = x.journal[1:1]
+emptyjournal!(x::Jop) = emptyjournal!(state(x).ops)
+
+journal(x::JArray) = x.journal
+journal(x::Jop) = state(x).ops.journal
+
+macro journal(expr::Expr)
+    sexpr = string(expr)
+
+    quote
+        x = $(esc(expr))
+        journal!(x, Meta.parse($sexpr))
+        x
+    end
+end
+
+macro journal(x::Symbol, expr::Expr)
+    sexpr = string(expr)
+    quote
+        journal!($(esc(x)), Meta.parse($sexpr))
+        $(esc(expr))
+    end
+end
+
+macro journal(r::QuoteNode, x::Symbol, expr::Expr)
+    sexpr = string(expr)
+    quote
+        $(esc(r)) == :reset && emptyjournal!($(esc(x)))
+        journal!($(esc(x)), Meta.parse($sexpr))
+        $(esc(expr))
+    end
+end
+
+function replay_construct!(mod, x::JArray, iblock::CartesianIndex)
+    expr = x.journal[1]
+
+    # using the JArray constructor is a special case
+    for iexpr = 1:length(expr.args)
+        if expr.args[iexpr] == :JArray
+            _where = x.blockmap[iblock]
+            _myid = myid()
+            _id = x.id
+
+            if _myid != _where
+                remotecall_fetch(block_delete_fromid!, _where, _id, _myid, iblock)
+                x.blockmap[iblock] = _myid
+            end
+
+            if _myid ∉ x.pids
+                sort!(push!(x.pids, _myid))
+            end
+
+            for pid in procs()
+                if pid != _myid && pid != _where
+                    remotecall_fetch(update_blockmap_and_pids_fromid!, pid, _id, _myid, iblock)
+                end
+            end
+
+            _expr = expr.args[iexpr+1]
+            x.localblocks[iblock] = @eval mod $(_expr)($iblock)
+            return nothing
+        end
+    end
+
+    _expr = metablocks(mod, expr, iblock)
+    x.localblocks[iblock] = @eval mod $(_expr)
+
+    nothing
+end
+replay_construct!(mod, x::JArray, iblock) = replay_construct!(mod, x, CartesianIndex(iblock))
+
+function replay!(mod, symx::String, x::JArray, iblock)
+    replay_construct!(mod, x, iblock)
+    for expr in x.journal[2:end]
+        if block_in_play(Symbol(symx), expr, iblock)
+            _expr = metablocks(mod, expr, iblock)
+            @eval mod $(_expr)
+        end
+    end
+end
+replay!(mod, symx, x::Jop, iblock::Int) = replay!(mod, symx, state(x).ops, iblock)
+
+macro replay(x, iblock)
+    _x = string(x)
+    :(replay!(@__MODULE__, $_x, $(esc(x)), $(esc(iblock))))
+end
+
+function block_in_play(symx::Symbol, expr::Expr, iblock)
+    inplay = true
+    args = expr.args
+    for (iarg, arg) in enumerate(args)
+        if arg == :getblock
+            isx = args[iarg+1] == symx
+            isi = CartesianIndex(iblock) == CartesianIndex(eval(args[iarg+2]))
+            (isx && isi) && (return true)
+            (isx && !isi) && (return false)
+        end
+        inplay = block_in_play(symx, arg, iblock)
+        inplay == false && (return inplay)
+    end
+    true
+end
+block_in_play(symx::Symbol, notexpr, iblock) = true
+
+function metablocks!(mod::Module, expr::Expr, iblock)
+    if expr.head == :call
+        _args = @view expr.args[2:end]
+        metablocks!(mod, _args, iblock)
+    else
+        metablocks!(mod, expr.args, iblock)
+    end
+    expr
+end
+
+function metablocks!(mod::Module, arg::Symbol, iblock)
+    e = :(@isdefined $arg)
+    isdefined = @eval mod $e
+    if isdefined
+        _arg = @eval mod $arg
+        T = Union{
+            JArray,
+            Jet{<:JetAbstractSpace,<:JetAbstractSpace,typeof(JetJBlock_f!)},
+            JopNl{<:Jet{<:JetAbstractSpace,<:JetAbstractSpace,typeof(JetJBlock_f!)}},
+            JopLn{<:Jet{<:JetAbstractSpace,<:JetAbstractSpace,typeof(JetJBlock_f!)}}
+            }
+        isblocked = isa(_arg, T)
+        if isblocked
+            return :(JournaledJets.journal_getblock($arg, $iblock))
+        end
+    end
+    arg
+end
+
+function metablocks!(mod::Module, args::AbstractArray, iblock)
+    for iarg in 1:length(args)
+        args[iarg] = metablocks!(mod, args[iarg], iblock)
+    end
+    args
+end
+
+metablocks!(mod, arg, iblock) = arg
+
+function metablocks(mod::Module, expr::Expr, iblock)
+    _expr = deepcopy(expr)
+    metablocks!(mod, _expr, iblock)
+    _expr
+end
+
+export JArray, JetJSpace, @journal, @replay
 
 end
