@@ -1,6 +1,6 @@
 module JournaledJets
 
-using Distributed, Jets, LinearAlgebra, ParallelOperations, Serialization, Schedulers
+using Distributed, Jets, LinearAlgebra, DistributedOperations, Serialization, Schedulers
 
 const registry = Dict{Tuple, Any}()
 let JID::Int = 1
