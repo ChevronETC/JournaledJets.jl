@@ -8,12 +8,12 @@ Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 DistributedOperations = "5333d757-b784-411c-847d-750c45219338"
 Jets = "2a57b368-ab28-5ba9-84aa-637fe7991822"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
 Schedulers = "fcb5363a-df8d-57f1-a64b-7615e60d793b"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 
 [extras]
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
-Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
