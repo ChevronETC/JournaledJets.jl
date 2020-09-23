@@ -318,6 +318,11 @@ function update_blockmap_and_pids_fromid!(_id, _whence, iblock)
     nothing
 end
 
+"""
+    Jets.getblock(x::JArray{T,N,A}, iblock::CartesianIndex) where {T,N,A}
+
+Get a block from a remote worked based on the iblock index
+"""
 function Jets.getblock(x::JArray{T,N,A}, iblock::CartesianIndex) where {T,N,A}
     _where = x.blockmap[iblock]
     _myid = myid()
@@ -346,6 +351,11 @@ function Jets.getblock(x::JArray{T,N,A}, iblock::CartesianIndex) where {T,N,A}
 end
 Jets.getblock(x::JArray, iblock::Int...) = getblock(x, CartesianIndex(iblock))
 
+"""
+    setblock_from_id!(id, xblock, iblock)
+
+Set a block in the registry based on the blockmap id, and block index
+"""
 function setblock_from_id!(id, xblock, iblock)
     x = registry[id]
     _xblock = x.localblocks[iblock]
@@ -353,6 +363,11 @@ function setblock_from_id!(id, xblock, iblock)
     nothing
 end
 
+"""
+    setblock_from_id!(x::JArray, xblock, iblock::CartesianIndex)
+
+Set a block from remote worker based on the blockmap id, and block index
+"""
 function Jets.setblock!(x::JArray, xblock, iblock::CartesianIndex)
     if myid() == x.blockmap[iblock]
         _xblock = x.localblocks[iblock]
@@ -368,6 +383,10 @@ Jets.setblock!(x::JArray, xblock, iblock::Int...) = setblock!(x, xblock, Cartesi
 size_dim(x::JArray{T,N}, idim) where {T,N} = x.indices[ntuple(_idim->_idim==idim ? size(x.indices)[idim] : 1, N)...][idim][end]
 Base.size(x::JArray{T,N}) where {T,N} = ntuple(idim->size_dim(x, idim), N)
 
+"""
+    getindex_from_id(id, iblock, i, N)
+
+"""
 function getindex_from_id(id, iblock, i, N)
     x = registry[id]
     iₒ = ntuple(idim->indices(x)[iblock][idim][1], N)
