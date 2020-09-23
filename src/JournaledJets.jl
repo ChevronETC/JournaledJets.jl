@@ -8,6 +8,11 @@ let JID::Int = 1
     next_jid() = (id = JID; JID += 1; (myid(),id))
 end
 
+"""
+    struct JArray
+
+Journal Array Struct for collecting Jet blocks in a 'Journal' for fault tolerance
+"""
 mutable struct JArray{T,N,A<:AbstractArray{T}} <: AbstractArray{T,N}
     id::Tuple{Int,Int}
     pids::Vector{Int}
@@ -19,19 +24,56 @@ end
 
 getblockmap_from_id(id) = registry[id].blockmap
 
+"""
+    getblockmap_from_id!(id, _blockmap)
+
+Pull out a block map from the registry based on id
+"""
 function getblockmap_from_id!(id, _blockmap)
     blockmap = localpart(_blockmap)
     blockmap .= registry[id].blockmap
 end
 
+"""
+    setblockmap_from_id!(id, _blockmap)
+
+Add a block map to the registry based using id as the 'key'
+"""
 setblockmap_from_id!(id, _blockmap) = registry[id].blockmap .= localpart(_blockmap)
 
+"""
+    indices(A::JArray)
+
+return indices from JArray passed in
+"""
 indices(A::JArray) = A.indices
+
+"""
+    indices_from_id!(id, _indices)
+
+return indices from registry based on passed in id
+"""
 indices_from_id!(id, _indices) = registry[id].indices = _indices
 
+"""
+    blocklength_from_id(id, iblock)
+
+compute local block length based on blockmap id and local block id
+"""
 blocklength_from_id(id, iblock) = length(registry[id].localblocks[iblock])
+
+"""
+    blocksize_from_id(id, iblock, idim)
+
+compute local block size based on blockmap id and local block id and a given dimension
+"""
 blocksize_from_id(id, iblock, idim) = size(registry[id].localblocks[iblock], idim)
 
+"""
+    initialize_local_part(id, pids, nblocks::NTuple{N,Int}, ::Type{A}) where {N,A}
+
+Create an empty block map for a given id in the registry
+"""
 function initialize_local_part(id, pids, nblocks::NTuple{N,Int}, ::Type{A}) where {N,A}
     blockmap = zeros(Int, nblocks)
     localblocks = Union{Nothing,A}[nothing for idx in CartesianIndices(nblocks)]
@@ -42,6 +84,11 @@ function initialize_local_part(id, pids, nblocks::NTuple{N,Int}, ::Type{A}) wher
     nothing
 end
 
+"""
+    initialize_local_part(id, pids, nblocks::NTuple{N,Int}, ::Type{A}) where {N,A}
+
+Create an empty block map for a given id in the registry
+"""
 function fill_local_part(iblock, id, f)
     x = registry[id]
     x.blockmap[iblock] = myid()
@@ -49,12 +96,19 @@ function fill_local_part(iblock, id, f)
     nothing
 end
 
+"""
+    finish_local_part(id, indices)
+"""
 function finish_local_part(id, indices)
     x = registry[id]
     x.indices .= indices
     nothing
 end
 
+"""
+    JArray(f::Function, nblocks::NTuple{N,Int}) where {N}
+
+"""
 function JArray(f::Function, nblocks::NTuple{N,Int}) where {N}
     pids = workers()
     id = next_jid()
@@ -98,6 +152,11 @@ function JArray(f::Function, nblocks::NTuple{N,Int}) where {N}
     x
 end
 
+"""
+    close_by_id(id)
+
+Delete the work id from the registry if it hasnt already been deleted. Used when work finishes
+"""
 function close_by_id(id)
     #ccall(:printf, Cvoid, (Cstring,), "close_by_id\n")
     if haskey(registry, id)
@@ -106,6 +165,9 @@ function close_by_id(id)
     nothing
 end
 
+"""
+    Base.close(x::JArray)
+"""
 function Base.close(x::JArray)
     #ccall(:printf, Cvoid, (Cstring,), "close\n")
     @sync for pid in workers()
@@ -117,6 +179,9 @@ function Base.close(x::JArray)
     nothing
 end
 
+"""
+    getindices(id, nblocks::NTuple{1}, blockmap)
+"""
 function getindices(id, nblocks::NTuple{1}, blockmap)
     indices = Vector{NTuple{1,UnitRange{Int}}}(undef, nblocks)
     i1 = 1
@@ -128,6 +193,9 @@ function getindices(id, nblocks::NTuple{1}, blockmap)
     indices
 end
 
+"""
+    getindices(id, nblocks::NTuple{N}, blockmap) where {N}
+"""
 function getindices(id, nblocks::NTuple{N}, blockmap) where {N}
     i1 = [Int[] for i=1:N]
     i2 = [Int[] for i=1:N]
@@ -149,7 +217,11 @@ function getindices(id, nblocks::NTuple{N}, blockmap) where {N}
     indices
 end
 
-# JArray serialization implementation <--
+"""
+    Serialization.serialize(S::AbstractSerializer, x::JArray{T,N}) where {T,N}
+
+Serilization implementation for JArray struct
+"""
 function Serialization.serialize(S::AbstractSerializer, x::JArray{T,N}) where {T,N}
     _where = worker_id_from_socket(S.io)
 
@@ -164,6 +236,11 @@ function Serialization.serialize(S::AbstractSerializer, x::JArray{T,N}) where {T
     end
 end
 
+"""
+    Serialization.deserialize(S::AbstractSerializer, ::Type{J}) where {T,N,A,J<:JArray{T,N,A}}
+
+Deserilization implementation for JArray struct
+"""
 function Serialization.deserialize(S::AbstractSerializer, ::Type{J}) where {T,N,A,J<:JArray{T,N,A}}
     what = deserialize(S)
     id_only = what[1]
@@ -184,9 +261,12 @@ function Serialization.deserialize(S::AbstractSerializer, ::Type{J}) where {T,N,
 
     x
 end
-# -->
 
-# JArray interface implementation <--
+"""
+    getblock_and_delete_fromid!(_id, _whence, iblock)
+
+Pop a block off the registry based on the block map id and block key
+"""
 function getblock_and_delete_fromid!(_id, _whence, iblock)
     x = registry[_id]
     blocks = x.localblocks
@@ -203,6 +283,11 @@ function getblock_and_delete_fromid!(_id, _whence, iblock)
     block
 end
 
+"""
+    block_delete_fromid!(_id, _whence, iblock)
+
+Remove a block from the registry based on the block map id and block key
+"""
 function block_delete_fromid!(_id, _whence, iblock)
     x = registry[_id]
     blocks = x.localblocks
@@ -217,6 +302,11 @@ function block_delete_fromid!(_id, _whence, iblock)
     nothing
 end
 
+"""
+    update_blockmap_and_pids_fromid!(_id, _whence, iblock)
+
+Update a block in the registry based on the block map id and block key with _whence
+"""
 function update_blockmap_and_pids_fromid!(_id, _whence, iblock)
     if haskey(registry, _id)
         x = registry[_id]
