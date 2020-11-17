@@ -119,7 +119,7 @@ function JArray(f::Function, nblocks::NTuple{N,Int}) where {N}
         @async remotecall_fetch(initialize_local_part, pid, id, pids, nblocks, A)
     end
 
-    cvxpmap(fill_local_part, CartesianIndices(nblocks), id, f; pids=pids)
+    epmap(fill_local_part, CartesianIndices(nblocks), id, f)
 
     blockmap = zeros(Int, nblocks)
     x = ArrayFutures(blockmap)
@@ -458,7 +458,7 @@ Base.convert(::Array, x::JArray{T,1,A}) where {T,A} = convert(Array, collect(x))
 JArray_local_norm(iblock, x::JArray, p) = norm(getblock(x, iblock), p)
 function LinearAlgebra.norm(x::JArray{T}, p::Real=2) where {T}
     _T = float(real(T))
-    z = cvxpmap(JArray_local_norm, 1:length(x.localblocks), x, p)
+    z = epmap(JArray_local_norm, 1:length(x.localblocks), x, p)
     if p == Inf
         maximum(z)
     elseif p == -Inf
@@ -473,13 +473,13 @@ end
 
 JArray_local_dot(iblock, x, y) = dot(getblock(x, iblock), getblock(y, iblock))
 function LinearAlgebra.dot(x::JArray, y::JArray)
-    z = cvxpmap(JArray_local_dot, 1:length(x.localblocks), x, y)
+    z = epmap(JArray_local_dot, 1:length(x.localblocks), x, y)
     sum(z)
 end
 
 JArray_local_extrema(iblock, x) = extrema(getblock(x, iblock))
 function Base.extrema(x::JArray)
-    mnmx = cvxpmap(JArray_local_extrema, 1:length(x.localblocks), x)
+    mnmx = epmap(JArray_local_extrema, 1:length(x.localblocks), x)
     mn, mx = mnmx[1]
     for i = 2:length(mnmx)
         _mn, _mx = mnmx[i]
@@ -491,7 +491,7 @@ end
 
 JArray_local_fill!(iblock, x, a) = fill!(getblock(x, iblock), a)
 function Base.fill!(x::JArray, a)
-    cvxpmap(JArray_local_fill!, 1:length(x.localblocks), x, a)
+    epmap(JArray_local_fill!, 1:length(x.localblocks), x, a)
     x
 end
 
@@ -524,7 +524,7 @@ function JArray_bcast_local_copyto!(iblock, dest, bc, S)
 end
 function Base.copyto!(dest::JArray{T,1,<:AbstractArray{T,N}}, bc::Broadcast.Broadcasted{JArrayStyle}) where {T,N}
     S = Broadcast.DefaultArrayStyle{N}
-    cvxpmap(JArray_bcast_local_copyto!, 1:length(dest.localblocks), dest, bc, S)
+    epmap(JArray_bcast_local_copyto!, 1:length(dest.localblocks), dest, bc, S)
     dest
 end
 # -->
@@ -540,7 +540,7 @@ end
 JetJSpace_length(iblock, spaces) = length(getblock(spaces, iblock)[1])
 
 function JetJSpace(spaces::JArray{S,1,A}) where {S<:JetAbstractSpace, A<:AbstractArray{S}}
-    n = cvxpmap(JetJSpace_length, 1:length(spaces.localblocks), spaces)
+    n = epmap(JetJSpace_length, 1:length(spaces.localblocks), spaces)
     iₒ = 1
     indices = Vector{UnitRange{Int}}(undef, length(spaces))
     for iblock = 1:length(indices)
@@ -580,7 +580,7 @@ function Jets.JetBlock(ops::JArray{T,2}) where {T<:Jop}
     else
         indices_dom = Vector{UnitRange{Int}}(undef, n2)
         blkspaces_dom = JArray(iblock->[JetJBlock_dom(iblock, ops)], (n2,))
-        n = cvxpmap(Int, JetJBlock_spc_length, 1:n2, blkspaces_dom)
+        n = epmap(Int, JetJBlock_spc_length, 1:n2, blkspaces_dom)
         i1 = 1
         for i = 1:length(n)
             i2 = i1 + n[i] - 1
@@ -596,7 +596,7 @@ function Jets.JetBlock(ops::JArray{T,2}) where {T<:Jop}
     else
         indices_rng = Vector{UnitRange{Int}}(undef, n1)
         blkspaces_rng = JArray(iblock->[JetJBlock_rng(iblock, ops)], (n1,))
-        n = cvxpmap(Int, JetJBlock_spc_length, 1:n1, blkspaces_rng)
+        n = epmap(Int, JetJBlock_spc_length, 1:n1, blkspaces_rng)
         i1 = 1
         for i = 1:length(n)
             i2 = i1 + n[i] - 1
@@ -625,7 +625,7 @@ end
 
 function JetJBlock_f!(d::JArray, m::AbstractArray; ops, kwargs...)
     _m = bcast(m, procs())
-    cvxpmap(JetJBlock_local_f!, 1:nblocks(d), d, _m, ops)
+    epmap(JetJBlock_local_f!, 1:nblocks(d), d, _m, ops)
     d
 end
 
@@ -639,7 +639,7 @@ end
 
 function JetJBlock_df!(d::JArray, m::AbstractArray; ops, kwargs...)
     _m = bcast(m, procs())
-    cvxpmap(JetJBlock_local_df!, 1:nblocks(d), d, _m, ops)
+    epmap(JetJBlock_local_df!, 1:nblocks(d), d, _m, ops)
     d
 end
 
@@ -653,7 +653,7 @@ end
 
 function JetJBlock_df′!(m::AbstractArray, d::JArray; ops, kwargs...)
     m .= 0
-    cvxpmapreduce!(m, JetJBlock_local_df′!, 1:nblocks(d), (d, ops))
+    epmapreduce!(m, JetJBlock_local_df′!, 1:nblocks(d), d, ops)
 end
 
 function JetJBlock_local_point!(iblock, j, mₒ)
@@ -663,7 +663,7 @@ function JetJBlock_local_point!(iblock, j, mₒ)
 end
 
 function Jets.point!(jet::Jet{D,R,typeof(JetJBlock_f!)}, mₒ::AbstractArray) where {D<:Jets.JetAbstractSpace, R<:Jets.JetAbstractSpace}
-    cvxpmap(JetJBlock_local_point!, CartesianIndices(size(state(jet).ops)), jet, mₒ)
+    epmap(JetJBlock_local_point!, CartesianIndices(size(state(jet).ops)), jet, mₒ)
     jet
 end
 
